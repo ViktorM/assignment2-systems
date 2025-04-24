@@ -13,7 +13,6 @@ import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Bool, Int
 
-
 from .nn_utils import softmax
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ class Linear(nn.Module):
             d_out: int
                 The number of output features.
         """
-        
+
         super().__init__()
         std = math.sqrt(2 / (d_in + d_out))
         self.weight: Float[Tensor, " d_out d_in"] = nn.Parameter(
@@ -105,7 +104,7 @@ class RMSNorm(nn.Module):
         x = x * rms
 
         return (self.weight * x).to(in_dtype)
-    
+
     def extra_repr(self):
         return f"hidden_size={self.weight.shape[0]}, eps={self.eps}"
 
@@ -145,7 +144,7 @@ class RotaryEmbedding(nn.Module):
         x2_rot = sin * x1 + cos * x2
         result = einx.rearrange('... x_half, ... x_half -> ... (x_half (1 + 1))', x1_rot, x2_rot).contiguous()
         return result
-    
+
     def extra_repr(self):
         return f"context_length={self._freq_cis_cache.shape[0]}, dim/2={self._freq_cis_cache.shape[1]}"
 
