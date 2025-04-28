@@ -1,9 +1,9 @@
 import argparse
 import torch
 import numpy as np
-from timeit import timeit, default_timer
+import pandas as pd
+from timeit import default_timer
 import sys
-import math
 
 
 # Add assignment2-systems/cs336-basics to path
@@ -123,6 +123,92 @@ def train(args):
     print(f"Average optimizer time: {avg_optimizer_time:.5f} seconds, std: {std_optimizer_time:.5f}")
 
 
+def benchmark_model(args, model_sizes, output_markdown_file="benchmark_results.md"):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    results = []
+
+    for size_name, params in model_sizes.items():
+        print(f"Benchmarking model size: {size_name}")
+
+        model = BasicsTransformerLM(
+            vocab_size=args.vocab_size,
+            context_length=args.context_length,
+            d_model=params["d_model"],
+            num_layers=params["num_layers"],
+            num_heads=params["num_heads"],
+            d_ff=params["d_ff"],
+            rope_theta=args.rope_theta
+        ).to(device)
+
+        if args.compile:
+            model = torch.compile(model)
+
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay
+        )
+
+        dataset = torch.randint(0, args.vocab_size, (100000,)).numpy()
+
+        # Warm-up steps
+        for _ in range(args.warmup_steps):
+            x, y = get_batch(dataset, args.batch_size, args.context_length, device)
+            optimizer.zero_grad()
+            logits = model(x)
+            loss = cross_entropy(logits, y)
+            loss.backward()
+            clip_gradient(model.parameters(), args.grad_clip)
+            optimizer.step()
+
+        # Benchmarking
+        forward_times, backward_times = [], []
+
+        for _ in range(args.benchmark_steps):
+            x, y = get_batch(dataset, args.batch_size, args.context_length, device)
+            optimizer.zero_grad()
+
+            torch.cuda.synchronize()
+            start_forward = default_timer()
+            logits = model(x)
+            torch.cuda.synchronize()
+            forward_time = default_timer() - start_forward
+            forward_times.append(forward_time)
+
+            torch.cuda.synchronize()
+            start_backward = default_timer()
+            loss = cross_entropy(logits, y)
+            loss.backward()
+            torch.cuda.synchronize()
+            backward_time = default_timer() - start_backward
+            backward_times.append(backward_time)
+
+            clip_gradient(model.parameters(), args.grad_clip)
+            optimizer.step()
+
+        avg_fwd, std_fwd = calc_average_and_std(forward_times)
+        avg_bwd, std_bwd = calc_average_and_std(backward_times)
+
+        results.append({
+            "Model Size": size_name,
+            "Forward Pass Avg (s)": avg_fwd,
+            "Forward Pass Std (s)": std_fwd,
+            "Backward Pass Avg (s)": avg_bwd,
+            "Backward Pass Std (s)": std_bwd,
+        })
+
+    df = pd.DataFrame(results)
+    markdown_results = df.to_markdown(index=False)
+    print(markdown_results)
+
+    # Save the markdown results to a file
+    with open(output_markdown_file, "w") as f:
+        f.write("# Benchmarking Results\n\n")
+        f.write(markdown_results)
+
+    print(f"Results saved to {output_markdown_file}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Transformer LM Training Benchmark"
@@ -143,4 +229,19 @@ if __name__ == "__main__":
     parser.add_argument("--compile", type=bool, default=False)
 
     parsed_args = parser.parse_args()
-    train(parsed_args)
+    #train(parsed_args)
+
+    model_sizes = {
+        "small": {"d_model": 768, "d_ff": 3072, "num_layers": 12, "num_heads": 12},
+        "medium": {"d_model": 1024, "d_ff": 4096, "num_layers": 24, "num_heads": 16},
+        "large": {"d_model": 1280, "d_ff": 5120, "num_layers": 36, "num_heads": 20},
+        "xl": {"d_model": 1600, "d_ff": 6400, "num_layers": 48, "num_heads": 25},
+        "2.7B": {"d_model": 2560, "d_ff": 10240, "num_layers": 32, "num_heads": 32},
+    }
+
+    output_markdown_file = "benchmark_results_" + "warmup_" + str(parsed_args.warmup_steps)
+    if parsed_args.compile:
+        output_markdown_file += "_compile"
+    output_markdown_file += ".md"
+
+    benchmark_model(parsed_args, model_sizes, output_markdown_file)
