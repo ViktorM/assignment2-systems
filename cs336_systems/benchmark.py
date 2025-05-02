@@ -1,5 +1,6 @@
 import argparse
 import torch
+import torch.cuda.nvtx as nvtx
 import numpy as np
 import pandas as pd
 from timeit import default_timer
@@ -26,6 +27,22 @@ def calc_average_and_std(array):
     avg = np.mean(array)
     std = np.std(array)
     return avg, std
+
+@nvtx.range("forward_pass")
+def forward_pass(model, x):
+    return model(x)
+
+@nvtx.range("backward_pass")
+def backward_pass(loss):
+    loss.backward()
+
+@nvtx.range("clip_gradient")
+def clip_gradient(model, grad_clip):
+    clip_gradient(model.parameters(), grad_clip)
+
+@nvtx.range("optimizer_step")
+def optimizer_step(optimizer):
+    optimizer.step()
 
 
 def train(args):
@@ -58,14 +75,15 @@ def train(args):
     ).numpy()
 
     # Warm-up steps
-    for _ in range(args.warmup_steps):
-        x, y = get_batch(dataset, args.batch_size, args.context_length, device)
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = cross_entropy(logits, y)
-        loss.backward()
-        clip_gradient(model.parameters(), args.grad_clip)
-        optimizer.step()
+    with nvtx.range("warmup"):
+        for _ in range(args.warmup_steps):
+            x, y = get_batch(dataset, args.batch_size, args.context_length, device)
+            optimizer.zero_grad()
+            logits = model(x)
+            loss = cross_entropy(logits, y)
+            loss.backward()
+            clip_gradient(model.parameters(), args.grad_clip)
+            optimizer.step()
 
     # Benchmarking steps
     torch.cuda.synchronize()
@@ -82,26 +100,26 @@ def train(args):
 
         torch.cuda.synchronize()
         start_forward_time = default_timer()
-        logits = model(x)
+        logits = forward_pass(model, x)
         forward_time = default_timer() - start_forward_time
         forward_times.append(forward_time)
 
         torch.cuda.synchronize()
         start_backward_time = default_timer()
         loss = cross_entropy(logits, y)
-        loss.backward()
+        backward_pass(loss)
         backward_time = default_timer() - start_backward_time        
         backward_times.append(backward_time)
 
         torch.cuda.synchronize()
         start_clip_time = default_timer()
-        clip_gradient(model.parameters(), args.grad_clip)
+        clip_gradient(model, args.grad_clip)
         clip_time = default_timer() - start_clip_time
         clip_times.append(clip_time)
 
         torch.cuda.synchronize()
         start_optimizer_time = default_timer()
-        optimizer.step()
+        optimizer_step(optimizer)
         optimizer_time = default_timer() - start_optimizer_time
         optimizer_times.append(optimizer_time)
 
